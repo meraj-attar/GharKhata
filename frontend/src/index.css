@@ -1,0 +1,24 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172554; background: #F5F3FF; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .6; }
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 3px solid #A5B4FC; outline-offset: 2px; }
+@layer components {
+  .surface { @apply bg-white border border-line rounded-3xl shadow-card; }
+  .primary-btn { @apply inline-flex items-center justify-center gap-2 rounded-xl bg-indigo px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-[#4338CA] active:scale-[.99] disabled:active:scale-100; }
+  .secondary-btn { @apply inline-flex items-center justify-center gap-2 rounded-xl border border-line bg-white px-4 py-2.5 text-sm font-semibold text-navy transition hover:bg-canvas; }
+  .icon-btn { @apply inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted transition hover:bg-canvas hover:text-indigo; }
+  .field { @apply w-full rounded-xl border border-line bg-white px-3.5 py-3 text-sm font-medium text-navy outline-none transition placeholder:text-slate-400 focus:border-indigo focus:ring-2 focus:ring-indigo/10; }
+  .field-label { @apply mb-2 block text-xs font-semibold tracking-wide text-navy; }
+  .eyebrow { @apply text-[11px] font-bold uppercase tracking-[.16em] text-muted; }
+  .section-title { @apply text-[17px] font-bold tracking-tight text-navy; }
+}
+/* Support reduced motion and keep chart interactions comfortable. */
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
