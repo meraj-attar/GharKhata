@@ -1,6 +1,5 @@
 .env
 **/.env
-backend/.env
 **/__pycache__/
 **/.pytest_cache/
 **/*.pyc
@@ -8,5 +7,3 @@ backend/.venv/
 frontend/node_modules/
 frontend/dist/
 .DS_Store
-
-frontend/tsconfig.tsbuildinfo

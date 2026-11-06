@@ -1,21 +1,27 @@
 import csv
+import hashlib
+import json
+import re
 import io
 import calendar
 import unicodedata
 import uuid
+from pathlib import Path
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.report_exports import MIME_TYPES, build_export
 from app.database import get_db
-from app.models import Transaction, User
+from app.models import Transaction, TransactionIdempotency, User
 from app.schemas import (Category, ExpenseCategory, EXPENSE_CATEGORIES, LoginInput,
                          MeOut, TransactionInput, TransactionKind, TransactionOut)
 from app.security import (AuthContext, COOKIE_NAME, check_login_limit, clear_login_failures,
@@ -36,6 +42,8 @@ async def no_store(request: Request, call_next):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'no-referrer'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Cross-Origin-Resource-Policy'] = 'same-origin'
     return response
 
 
@@ -132,11 +140,38 @@ def list_transactions(
 
 @app.post('/api/transactions', response_model=TransactionOut, status_code=201)
 def create_transaction(body: TransactionInput, request: Request,
+                       idempotency_key: str | None = Header(default=None, alias='Idempotency-Key'),
                        auth: AuthContext = Depends(require_csrf), db: Session = Depends(get_db)):
     require_origin(request)
+    if idempotency_key is not None:
+        if not re.fullmatch(r'[A-Za-z0-9._:-]{1,128}', idempotency_key):
+            raise HTTPException(status_code=422, detail='Invalid Idempotency-Key')
+        fingerprint = hashlib.sha256(json.dumps(body.model_dump(mode='json'),
+                                               sort_keys=True).encode('utf-8')).hexdigest()
+        existing = db.get(TransactionIdempotency, (auth.user.id, idempotency_key))
+        if existing:
+            if existing.request_hash != fingerprint:
+                raise HTTPException(status_code=409, detail='Idempotency key reused with different content')
+            transaction = owned_transaction(db, auth.user.id, existing.transaction_id)
+            return transaction
     transaction = Transaction(user_id=auth.user.id, **body.model_dump())
     db.add(transaction)
-    db.commit()
+    if idempotency_key is not None:
+        db.flush()  # transaction UUID must exist before mapping the replay key
+        db.add(TransactionIdempotency(user_id=auth.user.id, key=idempotency_key,
+                                      request_hash=fingerprint, transaction_id=transaction.id))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key is None:
+            raise
+        existing = db.get(TransactionIdempotency, (auth.user.id, idempotency_key))
+        if existing is None:
+            raise  # unrelated integrity error; do not disguise it
+        if existing.request_hash != fingerprint:
+            raise HTTPException(status_code=409, detail='Idempotency key reused with different content') from None
+        return owned_transaction(db, auth.user.id, existing.transaction_id)
     db.refresh(transaction)
     return transaction
 
@@ -198,12 +233,15 @@ def dashboard(month: str, auth: AuthContext = Depends(get_auth), db: Session = D
     }
 
 
-def period_data(db: Session, user_id: uuid.UUID, start: date, end: date):
+def period_data(db: Session, user_id: uuid.UUID, start: date, end: date, limit: int | None = None):
     if start > end:
         raise HTTPException(status_code=422, detail='Start date cannot be after end date')
-    transactions = db.scalars(select(Transaction).where(
+    query = (select(Transaction).where(
         Transaction.user_id == user_id, Transaction.date >= start, Transaction.date <= end)
-        .order_by(Transaction.date.desc(), Transaction.created_at.desc())).all()
+        .order_by(Transaction.date.desc(), Transaction.created_at.desc()))
+    if limit is not None:
+        query = query.limit(limit)
+    transactions = db.scalars(query).all()
     return {
         'start_date': start.isoformat(), 'end_date': end.isoformat(),
         **totals(transactions),
@@ -230,9 +268,40 @@ def csv_safe(value: str | None) -> str:
 
 
 @app.get('/api/reports/export')
-def export_report(start_date: date, end_date: date, auth: AuthContext = Depends(get_auth),
-                  db: Session = Depends(get_db)):
-    data = period_data(db, auth.user.id, start_date, end_date)
+def export_report(
+    request: Request, start_date: date | None = None, end_date: date | None = None,
+    format: str = Query(default='csv', pattern=r'^(csv|xlsx|docx|pdf)$'),
+    report_type: str = Query(default='custom', pattern=r'^(monthly|yearly|custom|transactions)$'),
+    month: str | None = Query(default=None, max_length=7),
+    year: int | None = Query(default=None, ge=1, le=9999),
+    auth: AuthContext = Depends(get_auth), db: Session = Depends(get_db),
+):
+    allowed = {'start_date', 'end_date', 'format', 'report_type', 'month', 'year'}
+    supplied = [key for key, _ in request.query_params.multi_items()]
+    if any(key not in allowed for key in supplied) or len(supplied) != len(set(supplied)):
+        raise HTTPException(status_code=422, detail='Unexpected or duplicated report filter')
+    if report_type == 'monthly':
+        if month is None:
+            raise HTTPException(status_code=422, detail='Month is required for monthly reports')
+        start_date, end_date = month_bounds(month)
+    elif report_type == 'yearly':
+        if year is None:
+            raise HTTPException(status_code=422, detail='Year is required for yearly reports')
+        start_date, end_date = date(year, 1, 1), date(year, 12, 31)
+    elif start_date is None or end_date is None:
+        raise HTTPException(status_code=422, detail='Start and end dates are required')
+    if (end_date - start_date).days > 3660:
+        raise HTTPException(status_code=422, detail='Maximum report period is 10 years')
+    data = period_data(db, auth.user.id, start_date, end_date, limit=10001)
+    if len(data['transactions']) > 10000:
+        raise HTTPException(status_code=413, detail='Report exceeds 10,000 transactions. Select a shorter period.')
+    if format != 'csv':
+        body = build_export(data, format, report_type)
+        filename = f'GharKhata_{report_type}_{start_date.isoformat()}_to_{end_date.isoformat()}.{format}'
+        return Response(content=body, media_type=MIME_TYPES[format], headers={
+            'Content-Disposition': f'attachment; filename="{filename}"',
+            'X-Content-Type-Options': 'nosniff',
+        })
     output = io.StringIO(newline='')
     writer = csv.writer(output)
     writer.writerow(['GharKhata - Household Finance Manager'])
@@ -254,3 +323,11 @@ def export_report(start_date: date, end_date: date, auth: AuthContext = Depends(
     filename = f'GharKhata_{start_date.isoformat()}_to_{end_date.isoformat()}.csv'
     return Response(content='\ufeff' + output.getvalue(), media_type='text/csv; charset=utf-8',
                     headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+
+
+# Render single-service hosting keeps the browser and API on the same origin,
+# preserving HttpOnly SameSite=Strict cookie and relative /api request security.
+_frontend_dist = Path(__file__).resolve().parents[2] / 'frontend' / 'dist'
+if _frontend_dist.is_dir():
+    from fastapi.staticfiles import StaticFiles
+    app.mount('/', StaticFiles(directory=str(_frontend_dist), html=True), name='frontend')

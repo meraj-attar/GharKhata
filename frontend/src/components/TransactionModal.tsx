@@ -1,4 +1,4 @@
-import { useEffect, useId, useState, type FormEvent } from 'react'
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { ArrowDownLeft, ArrowUpRight, X } from 'lucide-react'
 import { api } from '../lib/api'
 import { localDateISO } from '../lib/format'
@@ -16,6 +16,7 @@ export default function TransactionModal({ edit, onClose, onSaved }: {
   } : { type: 'expense', amount: '', category: 'Grocery', date: localDateISO(), description: '' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const retryRef = useRef<{ payload: string; key: string } | null>(null)
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) { if (e.key === 'Escape' && !busy) onClose() }
@@ -39,7 +40,13 @@ export default function TransactionModal({ edit, onClose, onSaved }: {
     try {
       const normalized: TransactionForm = { ...form, description: form.description?.trim() || null }
       if (edit) await api.edit(edit.id, normalized)
-      else await api.add(normalized)
+      else {
+        const payload = JSON.stringify(normalized)
+        if (!retryRef.current || retryRef.current.payload !== payload) {
+          retryRef.current = { payload, key: crypto.randomUUID() }
+        }
+        await api.add(normalized, retryRef.current.key)
+      }
       onSaved()
     } catch (err) { setError(err instanceof Error ? err.message : 'Could not save the transaction.') }
     finally { setBusy(false) }

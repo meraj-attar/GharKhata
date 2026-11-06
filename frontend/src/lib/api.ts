@@ -7,7 +7,7 @@ export class ApiError extends Error {
   constructor(message: string, public status: number) { super(message) }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function fetchApi(path: string, init: RequestInit = {}): Promise<Response> {
   let response: Response
   try {
     response = await fetch(`/api${path}`, {
@@ -28,10 +28,26 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const message = typeof json.detail === 'string' ? json.detail
       : Array.isArray(json.detail) ? json.detail.map((item: { msg?: string }) => item.msg || 'Invalid input').join(' · ')
         : 'Something went wrong. Please try again.'
+    if (response.status === 401 && path !== '/auth/login') {
+      setCsrfToken(null)
+      window.dispatchEvent(new Event('gharkhata:session-expired'))
+    }
     throw new ApiError(message, response.status)
   }
+  return response
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetchApi(path, init)
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+type ReportFormat = 'csv' | 'xlsx' | 'docx' | 'pdf'
+type ReportType = 'monthly' | 'yearly' | 'custom' | 'transactions'
+type ExportFilters = { start: string; end: string; format: ReportFormat; reportType: ReportType; month?: string; year?: number }
+function reportQuery(start: string, end: string) {
+  return new URLSearchParams({ start_date: start, end_date: end }).toString()
 }
 
 export const api = {
@@ -53,12 +69,24 @@ export const api = {
     Object.entries(filters).forEach(([key, value]) => { if (value) search.set(key, value) })
     return request<Transaction[]>(`/transactions?${search.toString()}`)
   },
-  add: (transaction: TransactionForm) => request<Transaction>('/transactions', { method: 'POST', body: JSON.stringify(transaction) }),
+  add: (transaction: TransactionForm, idempotencyKey?: string) => request<Transaction>('/transactions', {
+    method: 'POST', body: JSON.stringify(transaction),
+    ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
+  }),
   edit: (id: string, transaction: TransactionForm) => request<Transaction>(`/transactions/${id}`, { method: 'PUT', body: JSON.stringify(transaction) }),
   delete: (id: string) => request<void>(`/transactions/${id}`, { method: 'DELETE' }),
   report: (start: string, end: string) => request<ReportData>(`/reports?${reportQuery(start, end)}`),
-  reportDownloadUrl: (start: string, end: string) => `/api/reports/export?${reportQuery(start, end)}`,
-}
-function reportQuery(start: string, end: string) {
-  return new URLSearchParams({ start_date: start, end_date: end }).toString()
+  async downloadReport(filters: ExportFilters): Promise<{ blob: Blob; filename: string }> {
+    const query = new URLSearchParams({
+      start_date: filters.start, end_date: filters.end, format: filters.format,
+      report_type: filters.reportType,
+    })
+    if (filters.reportType === 'monthly' && filters.month) query.set('month', filters.month)
+    if (filters.reportType === 'yearly' && filters.year) query.set('year', String(filters.year))
+    const response = await fetchApi(`/reports/export?${query}`)
+    const header = response.headers.get('Content-Disposition') || ''
+    const filename = /filename="([A-Za-z0-9_.-]+)"/.exec(header)?.[1] ||
+      `GharKhata_${filters.reportType}_${filters.start}_to_${filters.end}.${filters.format}`
+    return { blob: await response.blob(), filename }
+  },
 }

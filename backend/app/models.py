@@ -43,3 +43,15 @@ class Transaction(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
     user: Mapped[User] = relationship(back_populates='transactions')
+
+
+class TransactionIdempotency(Base):
+    """Atomic, persistent replay protection for create requests."""
+    __tablename__ = 'transaction_idempotency'
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), primary_key=True)
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey('transactions.id', ondelete='CASCADE'), nullable=False)

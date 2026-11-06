@@ -118,6 +118,11 @@ export default function App() {
     } finally { setReady(true) }
   }
   useEffect(() => { void checkSession() }, [])
+  useEffect(() => {
+    const onExpired = () => { setCsrfToken(null); setSession(null) }
+    window.addEventListener('gharkhata:session-expired', onExpired)
+    return () => window.removeEventListener('gharkhata:session-expired', onExpired)
+  }, [])
   if (!ready) return <div className="flex min-h-dvh items-center justify-center bg-canvas"><Loading/></div>
   if (startupError) return <div className="mx-auto max-w-md px-5 py-20"><ErrorMessage message={startupError} retry={() => { setReady(false); void checkSession() }}/></div>
   if (!session) return <LoginScreen onSignedIn={setSession}/>
